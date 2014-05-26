@@ -14,6 +14,7 @@ from django.utils.safestring import mark_safe
 from django.utils.translation import ugettext as _
 
 from mptt.utils import tree_item_iterator, drilldown_tree_for_node
+from hvad.models import BaseTranslationModel
 
 register = template.Library()
 
@@ -244,7 +245,11 @@ def cache_tree_children(queryset):
 
     # If ``queryset`` is QuerySet-like, set ordering to depth-first
     if hasattr(queryset, 'order_by'):
-        mptt_opts = queryset.model._mptt_meta
+        if isinstance(queryset.model, type(BaseTranslationModel)):
+            mptt_opts = queryset.shared_model._mptt_meta
+        else:
+            mptt_opts = queryset.model._mptt_meta
+             
         tree_id_attr = mptt_opts.tree_id_attr
         left_attr = mptt_opts.left_attr
         queryset = queryset.order_by(tree_id_attr, left_attr)
