@@ -6,6 +6,8 @@ Utilities for implementing Modified Preorder Tree Traversal with your
 Django Models and working with trees of Model instances.
 
 .. image:: https://secure.travis-ci.org/django-mptt/django-mptt.png?branch=master
+    :alt: Build Status
+    :target: https://travis-ci.org/django-mptt/django-mptt
 
 Project home: http://github.com/django-mptt/django-mptt/
 
@@ -32,7 +34,6 @@ details about how the technique itself works:
 
 .. _`Trees in SQL`: http://www.ibase.ru/devinfo/DBMSTrees/sqltrees.html
 .. _`Storing Hierarchical Data in a Database`: http://www.sitepoint.com/print/hierarchical-data-database
-.. _`Managing Hierarchical Data in MySQL`: http://mirror.neu.edu.cn/mysql/tech-resources/articles/hierarchical-data.html
 
 
 What is ``django-mptt``?
@@ -47,7 +48,7 @@ structure and provides tools for working with trees of model instances.
 Requirements
 ------------
 
-* Python 2.6+ (with experimental support for python 3.2+)
+* Python 2.6+ (with experimental support for python 3.2+ and PyPy)
 * Django 1.4.2+
 
 Feature overview
