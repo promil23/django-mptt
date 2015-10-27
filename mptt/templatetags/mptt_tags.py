@@ -255,10 +255,11 @@ def cache_tree_children(queryset):
 
     # If ``queryset`` is QuerySet-like, set ordering to depth-first
     if hasattr(queryset, 'order_by'):
-        if isinstance(queryset.model, type(BaseTranslationModel)):
-            mptt_opts = queryset.shared_model._mptt_meta
-        else:
+        #if isinstance(queryset.model, type(BaseTranslationModel)):
+        if hasattr(queryset.model, '_mptt_meta'):
             mptt_opts = queryset.model._mptt_meta
+        else:
+            mptt_opts = queryset.shared_model._mptt_meta
              
         tree_id_attr = mptt_opts.tree_id_attr
         left_attr = mptt_opts.left_attr
