@@ -5,6 +5,7 @@ from __future__ import unicode_literals
 import contextlib
 from itertools import groupby
 
+import django
 from django.db import models, connections, router
 from django.db.models import F, ManyToManyField, Max, Q
 from django.utils.translation import ugettext as _
@@ -12,6 +13,12 @@ from django.utils.translation import ugettext as _
 from mptt.exceptions import CantDisableUpdates, InvalidMove
 from mptt.querysets import TreeQuerySet
 from mptt.utils import _get_tree_model
+
+if django.VERSION < (1, 7):
+    _tree_manager_superclass = models.Manager
+else:
+    # Django 1.7+ added this crazy new pattern for manager inheritance.
+    _tree_manager_superclass = models.Manager.from_queryset(TreeQuerySet)
 
 __all__ = ('TreeManager',)
 
@@ -57,7 +64,7 @@ CUMULATIVE_COUNT_SUBQUERY_M2M = """(
 )"""
 
 
-class TreeManager(models.Manager):
+class TreeManager(_tree_manager_superclass):
     """
     A manager for working with trees of objects.
     """
@@ -65,7 +72,7 @@ class TreeManager(models.Manager):
     def contribute_to_class(self, model, name):
         super(TreeManager, self).contribute_to_class(model, name)
 
-        if not (model._meta.abstract or model._meta.proxy):
+        if not model._meta.abstract:
             self.tree_model = _get_tree_model(model)
 
             self._base_manager = None
@@ -73,19 +80,15 @@ class TreeManager(models.Manager):
                 # _base_manager is the treemanager on tree_model
                 self._base_manager = self.tree_model._tree_manager
 
-    def get_query_set(self, *args, **kwargs):
-        """
-        Ensures that this manager always returns nodes in tree order.
-
-        This method can be removed when support for Django < 1.6 is dropped.
-        """
-        return TreeQuerySet(self.model, using=self._db).order_by(self.tree_id_attr, self.left_attr)
-
     def get_queryset(self, *args, **kwargs):
         """
         Ensures that this manager always returns nodes in tree order.
         """
-        return TreeQuerySet(self.model, using=self._db).order_by(self.tree_id_attr, self.left_attr)
+        if django.VERSION < (1, 7):
+            qs = TreeQuerySet(self.model, using=self._db)
+        else:
+            qs = super(TreeManager, self).get_queryset(*args, **kwargs)
+        return qs.order_by(self.tree_id_attr, self.left_attr)
 
     def _get_queryset_relatives(self, queryset, direction, include_self):
         """
@@ -99,54 +102,84 @@ class TreeManager(models.Manager):
         Instead, it should be used via ``get_queryset_descendants()`` and/or
         ``get_queryset_ancestors()``.
 
-        This function works by grouping contiguous siblings, finding the smallest
-        left and greatest right attributes in the group, and using those to create
-        a query that requests ranges of models rather than querying for each
-        individual model. The net result is a simpler query and fewer SQL variables.
+        This function works by grouping contiguous siblings and using them to create
+        a range that selects all nodes between the range, instead of querying for each
+        node individually. Three variables are required when querying for ancestors or
+        descendants: tree_id_attr, left_attr, right_attr. If we weren't using ranges
+        and our queryset contained 100 results, the resulting SQL query would contain
+        300 variables. However, when using ranges, if the same queryset contained 10
+        sets of contiguous siblings, then the resulting SQL query should only contain
+        30 variables.
+
+        The attributes used to create the range are completely
+        dependent upon whether you are ascending or descending the tree.
+
+        * Ascending (ancestor nodes): select all nodes whose right_attr is greater
+          than (or equal to, if include_self = True) the smallest right_attr within
+          the set of contiguous siblings, and whose left_attr is less than (or equal
+          to) the largest left_attr within the set of contiguous siblings.
+
+        * Descending (descendant nodes): select all nodes whose left_attr is greater
+          than (or equal to, if include_self = True) the smallest left_attr within
+          the set of contiguous siblings, and whose right_attr is less than (or equal
+          to) the largest right_attr within the set of contiguous siblings.
+
+        The result is the more contiguous siblings in the original queryset, the fewer
+        SQL variables will be required to execute the query.
         """
         assert self.model is queryset.model
 
         opts = queryset.model._mptt_meta
 
-        if not queryset:
-            return self.none()
-
         filters = Q()
 
         e = 'e' if include_self else ''
+        max_op = 'lt' + e
+        min_op = 'gt' + e
         if direction == 'asc':
-            lft_op = 'lt' + e
-            rght_op = 'gt' + e
+            max_attr = opts.left_attr
+            min_attr = opts.right_attr
         elif direction == 'desc':
-            lft_op = 'gt' + e
-            rght_op = 'lt' + e
+            max_attr = opts.right_attr
+            min_attr = opts.left_attr
 
-        l_key = '%s__%s' % (opts.left_attr, lft_op)
-        r_key = '%s__%s' % (opts.right_attr, rght_op)
-        t_key = opts.tree_id_attr
+        tree_key = opts.tree_id_attr
+        min_key = '%s__%s' % (min_attr, min_op)
+        max_key = '%s__%s' % (max_attr, max_op)
 
-        q = queryset.order_by(opts.tree_id_attr, opts.parent_attr, opts.left_attr)
+        q = queryset.order_by(opts.tree_id_attr, opts.parent_attr, opts.left_attr).only(
+            opts.tree_id_attr,
+            opts.left_attr,
+            opts.right_attr,
+            min_attr,
+            max_attr,
+            opts.parent_attr)
 
-        for group in groupby(q, key = lambda n: (getattr(n, opts.tree_id_attr), getattr(n, opts.parent_attr))):
+        if not q:
+            return self.none()
+
+        for group in groupby(q, key = lambda n: (getattr(n, opts.tree_id_attr), getattr(n, opts.parent_attr + '_id'))):
             next_lft = None
             for node in list(group[1]):
-                tree, lft, rght = (getattr(node, opts.tree_id_attr),
-                                   getattr(node, opts.left_attr),
-                                   getattr(node, opts.right_attr))
+                tree, lft, rght, min_val, max_val = (getattr(node, opts.tree_id_attr),
+                                                     getattr(node, opts.left_attr),
+                                                     getattr(node, opts.right_attr),
+                                                     getattr(node, min_attr),
+                                                     getattr(node, max_attr))
                 if next_lft is None:
                     next_lft = rght + 1
-                    minl_maxr = {'lft': lft, 'rght': rght}
+                    min_max = {'min': min_val, 'max': max_val}
                 elif lft == next_lft:
-                    if lft < minl_maxr['lft']:
-                        minl_maxr['lft'] = lft
-                    if rght > minl_maxr['rght']:
-                        minl_maxr['rght'] = rght
+                    if min_val < min_max['min']:
+                        min_max['min'] = min_val
+                    if max_val > min_max['max']:
+                        min_max['max'] = max_val
                     next_lft = rght + 1
                 elif lft != next_lft:
-                    filters |= Q(**{t_key: tree, l_key: minl_maxr['lft'], r_key: minl_maxr['rght']})
-                    minl_maxr = {'lft': lft, 'rght': rght}
+                    filters |= Q(**{tree_key: tree, min_key: min_max['min'], max_key: min_max['max']})
+                    min_max = {'min': min_val, 'max': max_val}
                     next_lft = rght + 1
-            filters |= Q(**{t_key: tree, l_key: minl_maxr['lft'], r_key: minl_maxr['rght']})
+            filters |= Q(**{tree_key: tree, min_key: min_max['min'], max_key: min_max['max']})
 
         return self.filter(filters)
 

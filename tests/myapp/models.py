@@ -1,18 +1,26 @@
 from __future__ import unicode_literals
-import uuid
 from django.db import models
-from django.db.models.signals import pre_save
 from django.utils.encoding import python_2_unicode_compatible
+
 
 import mptt
 from mptt.fields import TreeForeignKey, TreeOneToOneField, TreeManyToManyField
 from mptt.models import MPTTModel
 from mptt.managers import TreeManager
-from django.db.models.query import QuerySet
+from django.db.models.query import QuerySet, EmptyQuerySet
 
 
 class CustomTreeQueryset(QuerySet):
-    pass
+
+    def custom_method(self):
+        pass
+
+
+class CustomEmptyTreeQueryset(EmptyQuerySet):
+    """This is only used pre Django 1.6"""
+
+    def custom_method(self):
+        pass
 
 
 class CustomTreeManager(TreeManager):
@@ -22,6 +30,9 @@ class CustomTreeManager(TreeManager):
     def get_queryset(self):
         # Django 1.8 removed the fallbacks here.
         return CustomTreeQueryset(model=self.model, using=self._db)
+
+    def get_empty_query_set(self):
+        return self.get_queryset().none()
 
 
 @python_2_unicode_compatible
@@ -87,11 +98,13 @@ class MultiOrder(MPTTModel):
 
 class Node(MPTTModel):
     parent = TreeForeignKey('self', null=True, blank=True, related_name='children')
+    # To check that you can set level_attr etc to an existing field.
+    level = models.IntegerField()
 
     class MPTTMeta:
         left_attr = 'does'
         right_attr = 'zis'
-        level_attr = 'madness'
+        level_attr = 'level'
         tree_id_attr = 'work'
 
 
@@ -124,7 +137,10 @@ class Person(MPTTModel):
     parent = TreeForeignKey('self', null=True, blank=True, related_name='children')
 
     # just testing it's actually possible to override the tree manager
-    my_tree_manager = CustomTreeManager()
+    objects = CustomTreeManager()
+
+    # This line is set because of https://github.com/django-mptt/django-mptt/issues/369
+    _default_manager = objects
 
     def __str__(self):
         return self.name
@@ -207,6 +223,8 @@ class ConcreteConcrete(ConcreteModel):
 # 4. proxy models
 
 class SingleProxyModel(ConcreteModel):
+    objects = CustomTreeManager()
+
     class Meta:
         proxy = True
 
@@ -214,6 +232,20 @@ class SingleProxyModel(ConcreteModel):
 class DoubleProxyModel(SingleProxyModel):
     class Meta:
         proxy = True
+
+
+# 5. swappable models
+
+class SwappableModel(MPTTModel):
+    parent = TreeForeignKey('self', null=True, blank=True, related_name='children')
+
+    class Meta:
+        swappable = 'MPTT_SWAPPABLE_MODEL'
+
+
+class SwappedInModel(MPTTModel):
+    parent = TreeForeignKey('self', null=True, blank=True, related_name='children')
+    name = models.CharField(max_length=50)
 
 
 class AutoNowDateFieldModel(MPTTModel):

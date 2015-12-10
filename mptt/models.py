@@ -309,10 +309,19 @@ class MPTTModelBase(ModelBase):
                 cls.__bases__ = tuple(bases)
 
             if _get_tree_model(cls) is cls:
+                # HACK: _meta.get_field() doesn't work before AppCache.ready in Django>=1.8
+                # ( see https://code.djangoproject.com/ticket/24231 )
+                # So the only way to get existing fields is using local_fields on all superclasses.
+                existing_field_names = set()
+                for base in cls.mro():
+                    if hasattr(base, '_meta'):
+                        existing_field_names.update([f.name for f in base._meta.local_fields])
+
                 for key in ('left_attr', 'right_attr', 'tree_id_attr', 'level_attr'):
                     field_name = getattr(cls._mptt_meta, key)
-                    field = models.PositiveIntegerField(db_index=True, editable=False)
-                    field.contribute_to_class(cls, field_name)
+                    if field_name not in existing_field_names:
+                        field = models.PositiveIntegerField(db_index=True, editable=False)
+                        field.contribute_to_class(cls, field_name)
 
             # Add a tree manager, if there isn't one already
             if not abstract:
@@ -327,21 +336,14 @@ class MPTTModelBase(ModelBase):
 
                 # make sure we have a tree manager somewhere
                 tree_manager = None
-                for attr in sorted(dir(cls)):
-                    try:
-                        # HACK: avoid using getattr(cls, attr)
-                        # because it calls __get__ on descriptors, which can cause nasty side effects
-                        # with more inconsiderate apps.
-                        # (e.g. django-tagging's TagField is a descriptor which can do db queries on getattr)
-                        # ( ref: http://stackoverflow.com/questions/27790344 )
-                        obj = cls.__dict__[attr]
-                    except KeyError:
-                        continue
-                    if isinstance(obj, TreeManager):
-                        tree_manager = obj
+                cls_managers = cls._meta.concrete_managers + cls._meta.abstract_managers
+                for __, __, cls_manager in cls_managers:
+                    if isinstance(cls_manager, TreeManager):
                         # prefer any locally defined manager (i.e. keep going if not local)
-                        if obj.model is cls:
+                        if cls_manager.model is cls:
+                            tree_manager = cls_manager
                             break
+
                 if tree_manager and tree_manager.model is not cls:
                     tree_manager = tree_manager._copy_to_model(cls)
                 elif tree_manager is None:
@@ -913,13 +915,15 @@ class MPTTModel(six.with_metaclass(MPTTModelBase, models.Model)):
                     opts.set_raw_field_value(self, opts.parent_attr, parent_id)
             else:
                 opts.set_raw_field_value(self, opts.parent_attr, parent_id)
-                if (not track_updates) and (django.get_version() >= '1.5'):
+                if not track_updates:
                     # When not using delayed/disabled updates,
-                    # populate update_fields (Django 1.5 and later) with user defined model fields.
+                    # populate update_fields with user defined model fields.
                     # This helps preserve tree integrity when saving model on top of a modified tree.
                     if len(args) > 3:
                         if not args[3]:
+                            args = list(args)
                             args[3] = self._get_user_field_names()
+                            args = tuple(args)
                     else:
                         if not kwargs.get("update_fields", None):
                             kwargs["update_fields"] = self._get_user_field_names()
